@@ -133,7 +133,14 @@ app.whenReady().then(() => {
         return;
       }
       
-      const pythonPath = app.isPackaged ? 'python3' : path.join(process.env.APP_ROOT!, '.venv/bin/python');
+      const isWin = process.platform === 'win32';
+      const bundledPythonDir = app.isPackaged 
+        ? path.join(process.resourcesPath, 'backend', 'win-python') 
+        : path.join(process.env.APP_ROOT!, 'backend', 'win-python');
+      
+      const pythonPath = app.isPackaged 
+        ? (isWin ? path.join(bundledPythonDir, 'python.exe') : 'python3')
+        : path.join(process.env.APP_ROOT!, isWin ? '.venv\\Scripts\\python.exe' : '.venv/bin/python');
       const scriptPath = app.isPackaged ? path.join(process.resourcesPath, 'backend/moto_control.py') : path.join(process.env.APP_ROOT!, 'backend/moto_control.py');
       const cwdPath = app.isPackaged ? process.resourcesPath : process.env.APP_ROOT;
       
@@ -210,8 +217,13 @@ app.on('before-quit', () => {
 app.on('window-all-closed', () => {
   // Kill daemon if running
   try {
-     const { execSync } = require('child_process');
-     execSync('pkill -f moto_control.py.*--daemon');
+     if (pythonDaemon) {
+         pythonDaemon.kill();
+     }
+     if (process.platform === 'linux') {
+         const { execSync } = require('child_process');
+         execSync('pkill -f moto_control.py.*--daemon');
+     }
   } catch(e) {}
   
   if (process.platform !== 'darwin') {

@@ -7,11 +7,77 @@ import sys
 import json
 import subprocess
 
-CLASSIC_MAC = "54:84:50:92:78:AE"
+CLASSIC_MAC = "AUTO"
 RFCOMM_PORT = 16
 
 HEAD = b"HEAD"
 TAIL = b"TAIL"
+
+def discover_moto_device():
+    """Dynamically discover connected or paired Moto Buds MAC address and responsive RFCOMM port."""
+    detected_mac = None
+    detected_port = None
+
+    if sys.platform == "linux":
+        import re
+        # 1. Check currently connected devices via bluetoothctl
+        try:
+            out = subprocess.check_output(["bluetoothctl", "devices", "Connected"], text=True, timeout=3)
+            for line in out.strip().splitlines():
+                m = re.match(r"^Device\s+([0-9A-Fa-f:]{17})\s+(.*)$", line.strip())
+                if m:
+                    mac, name = m.group(1), m.group(2)
+                    if any(kw in name.lower() for kw in ["moto", "buds"]):
+                        detected_mac = mac
+                        break
+        except Exception:
+            pass
+
+        # 2. Fallback to paired devices
+        if not detected_mac:
+            try:
+                out = subprocess.check_output(["bluetoothctl", "devices"], text=True, timeout=3)
+                for line in out.strip().splitlines():
+                    m = re.match(r"^Device\s+([0-9A-Fa-f:]{17})\s+(.*)$", line.strip())
+                    if m:
+                        mac, name = m.group(1), m.group(2)
+                        if any(kw in name.lower() for kw in ["moto", "buds"]):
+                            detected_mac = mac
+                            break
+            except Exception:
+                pass
+
+        # 3. Probe candidate RFCOMM ports (28 for Moto Buds 2, 16 for Moto Buds / Buds+)
+        if detected_mac:
+            candidate_ports = [28, 16, 13, 17, 1, 2, 3]
+            probe_packet = bytearray(b"HEAD\x08\x00\x00\x00\x80\x00\x00\x00\x00\x00\x57\xa3\x1f\xa5TAIL")
+            for port in candidate_ports:
+                s = None
+                try:
+                    s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+                    s.settimeout(0.5)
+                    s.connect((detected_mac, port))
+                    s.send(probe_packet)
+                    resp = s.recv(1024)
+                    if b"HEAD" in resp:
+                        detected_port = port
+                        break
+                except Exception:
+                    pass
+                finally:
+                    if s:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+
+            # Ensure Linux trust protocol is satisfied
+            try:
+                subprocess.run(["bluetoothctl", "trust", detected_mac], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+    return detected_mac, detected_port
 
 class MotoBudsController:
     def __init__(self, mac_address=CLASSIC_MAC, port=RFCOMM_PORT, output_json=False, is_daemon=False):
@@ -28,14 +94,23 @@ class MotoBudsController:
             print(msg)
 
     def connect(self):
+        # Resolve auto mac/port if needed
+        if self.mac_address in ("AUTO", None, ""):
+            auto_mac, auto_port = discover_moto_device()
+            if auto_mac:
+                self.mac_address = auto_mac
+            if auto_port:
+                self.port = auto_port
+
         self.log(f"[*] Connecting to {self.mac_address} on Port {self.port}...")
-        if self.mac_address == "127.0.0.1":
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        else:
-            self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-        self.sock.settimeout(3.0)
-        
+
         for attempt in range(5):
+            if self.mac_address == "127.0.0.1":
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            else:
+                self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+            self.sock.settimeout(3.0)
+
             try:
                 self.sock.connect((self.mac_address, self.port))
                 self.log("[+] Connected successfully!")
@@ -43,6 +118,12 @@ class MotoBudsController:
                 return True
             except Exception as e:
                 self.log(f"[-] Connection attempt {attempt+1} failed: {e}")
+                if self.sock:
+                    try:
+                        self.sock.close()
+                    except Exception:
+                        pass
+                    self.sock = None
                 time.sleep(0.5)
                 
         self.log("[-] Failed to connect after all attempts.")
@@ -255,7 +336,16 @@ def main():
         except Exception:
             pass
 
-    controller = MotoBudsController(mac_address=args.mac, port=args.port, output_json=args.json, is_daemon=args.daemon)
+    target_mac = args.mac
+    target_port = args.port
+    if target_mac in ("AUTO", "54:84:50:92:78:AE", None):
+        auto_mac, auto_port = discover_moto_device()
+        if auto_mac:
+            target_mac = auto_mac
+        if auto_port and target_port in (16, None):
+            target_port = auto_port
+
+    controller = MotoBudsController(mac_address=target_mac, port=target_port, output_json=args.json, is_daemon=args.daemon)
     
     if args.daemon:
         if not controller.connect():

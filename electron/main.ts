@@ -124,13 +124,7 @@ app.whenReady().then(() => {
   }
 
 
-  if (process.platform === 'linux') {
-     try {
-        spawn('bluetoothctl', ['trust', '54:84:50:92:78:AE'], { stdio: 'ignore' });
-     } catch (e) {
-        console.error("Failed to trust device", e);
-     }
-  }
+  // Trust is dynamically managed by backend/moto_control.py upon discovering the device MAC
 
   ipcMain.handle('start-daemon', async (event) => {
     return new Promise((resolve) => {

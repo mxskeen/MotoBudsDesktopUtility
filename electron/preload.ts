@@ -22,4 +22,12 @@ contextBridge.exposeInMainWorld('api', {
   setMinimizeToTray: (enabled: boolean) => ipcRenderer.send('set-minimize-to-tray', enabled),
   updateTrayTooltip: (text: string) => ipcRenderer.send('update-tray-tooltip', text),
   updateTrayMenu: (data: any) => ipcRenderer.send('update-tray-menu', data),
+
+  // Launch flags & Background triggers
+  getLaunchFlags: () => ipcRenderer.invoke('get-launch-flags'),
+  onTriggerConnect: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('trigger-connect', handler);
+    return () => ipcRenderer.removeListener('trigger-connect', handler);
+  },
 });

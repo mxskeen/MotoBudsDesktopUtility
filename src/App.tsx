@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useDeviceStore } from './store/useDeviceStore';
+import { useDeviceStore, applySavedSettingsToDevice } from './store/useDeviceStore';
 import { Loader2, Check } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 
@@ -23,6 +23,8 @@ declare global {
       setMinimizeToTray?: (enabled: boolean) => void;
       updateTrayTooltip?: (text: string) => void;
       updateTrayMenu?: (data: any) => void;
+      getLaunchFlags?: () => Promise<{ hidden?: boolean; autoConnect?: boolean }>;
+      onTriggerConnect?: (callback: () => void) => () => void;
     };
   }
 }
@@ -61,6 +63,9 @@ function App() {
   };
 
   const connectDevice = async () => {
+    if (useDeviceStore.getState().connected || isInitializing) {
+      return;
+    }
     if (!window.api || !window.api.startDaemon) {
       setStatusMsg("Electron API missing. Please restart the app.");
       return;
@@ -84,6 +89,7 @@ function App() {
         await window.api.motoCommand({ op: "info" });
         await window.api.motoCommand({ op: "sync" });
         await window.api.motoCommand({ op: "battery" });
+        await applySavedSettingsToDevice();
         
         setTimeout(() => {
           setIsInitializing(false);
@@ -106,6 +112,22 @@ function App() {
       window.api.setMinimizeToTray(useDeviceStore.getState().minimizeToTray);
     }
 
+    // Auto-connect if launched with background/connect flags
+    if (window.api && window.api.getLaunchFlags) {
+      window.api.getLaunchFlags().then((flags) => {
+        if (flags?.autoConnect) {
+          connectDevice();
+        }
+      }).catch(console.error);
+    }
+
+    let removeTriggerConnect: (() => void) | undefined;
+    if (window.api && window.api.onTriggerConnect) {
+      removeTriggerConnect = window.api.onTriggerConnect(() => {
+        connectDevice();
+      });
+    }
+
     const handleMotoEvent = (_event: any, payload: any) => {
        if (!payload) return;
        
@@ -120,12 +142,13 @@ function App() {
              if (data.hires_raw) parseAndInjectPDU(data.hires_raw);
              if (data.game_raw) parseAndInjectPDU(data.game_raw);
              if (data.inear_raw) parseAndInjectPDU(data.inear_raw);
-             if (data.gestures_raw) console.log("RAW_GESTURE_PAYLOAD=" + data.gestures_raw);
+             if (data.gestures_raw) parseAndInjectPDU(data.gestures_raw);
           } else if (payload.type === 'status') {
              if (payload.status === 'connected' && useDeviceStore.getState().reconnectStatus !== 'idle') {
                 useDeviceStore.getState().setReconnectStatus('success');
                 setTimeout(() => useDeviceStore.getState().setReconnectStatus('idle'), 2000);
                 window.api.motoCommand({ op: 'sync' });
+                applySavedSettingsToDevice();
              }
           } else if (payload.type === 'error') {
              console.error("Daemon error:", payload.message);
@@ -164,6 +187,9 @@ function App() {
     return () => {
        if (window.api && window.api.removeMotoEventListener) {
           window.api.removeMotoEventListener(handleMotoEvent);
+       }
+       if (removeTriggerConnect) {
+          removeTriggerConnect();
        }
     };
   }, []);

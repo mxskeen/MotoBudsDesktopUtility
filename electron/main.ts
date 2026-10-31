@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { spawn } from 'child_process';
 
@@ -12,10 +13,35 @@ process.env.VITE_PUBLIC = process.env.VITE_DEV_SERVER_URL
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
-let minimizeToTray = false;
+const isStartHidden = process.argv.includes('--hidden') || process.argv.includes('--background') || process.argv.includes('--minimized');
+const shouldAutoConnect = process.argv.includes('--connect') || process.argv.includes('--auto-connect');
+let minimizeToTray = isStartHidden;
 let isQuitting = false;
 let trayData = { battery: { left: null, right: null, case: null, inCaseL: false, inCaseR: false }, ancMode: 0, inEarL: false, inEarR: false };
 let pythonDaemon: any = null;
+
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+} else {
+  app.on('second-instance', (_event, commandLine) => {
+    const shouldConnect = commandLine.includes('--connect') || commandLine.includes('--auto-connect');
+    const startHidden = commandLine.includes('--hidden') || commandLine.includes('--background') || commandLine.includes('--minimized');
+
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!startHidden) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      if (shouldConnect) {
+        mainWindow.webContents.send('trigger-connect');
+      }
+    }
+  });
+}
 
 
 app.commandLine.appendSwitch('enable-web-bluetooth', 'true');
@@ -42,7 +68,19 @@ function createWindow() {
   });
 
   mainWindow.on('ready-to-show', () => {
-    mainWindow?.show();
+    if (!isStartHidden) {
+      mainWindow?.show();
+    }
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (shouldAutoConnect) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+          mainWindow.webContents.send('trigger-connect');
+        }
+      }, 500);
+    }
   });
 
   mainWindow.on('close', (event) => {
@@ -61,6 +99,13 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+
+  ipcMain.handle('get-launch-flags', () => {
+    return {
+      hidden: isStartHidden,
+      autoConnect: shouldAutoConnect,
+    };
+  });
 
   ipcMain.on('set-minimize-to-tray', (event, enabled) => {
     minimizeToTray = enabled;
@@ -138,8 +183,9 @@ app.whenReady().then(() => {
         ? path.join(process.resourcesPath, 'backend', 'win-python') 
         : path.join(process.env.APP_ROOT!, 'backend', 'win-python');
       
+      const linuxPython = fs.existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3';
       const pythonPath = app.isPackaged 
-        ? (isWin ? path.join(bundledPythonDir, 'python.exe') : 'python3')
+        ? (isWin ? path.join(bundledPythonDir, 'python.exe') : linuxPython)
         : path.join(process.env.APP_ROOT!, isWin ? '.venv\\Scripts\\python.exe' : '.venv/bin/python');
       const scriptPath = app.isPackaged ? path.join(process.resourcesPath, 'backend/moto_control.py') : path.join(process.env.APP_ROOT!, 'backend/moto_control.py');
       const cwdPath = app.isPackaged ? process.resourcesPath : process.env.APP_ROOT;

@@ -56,28 +56,113 @@ export interface DeviceState {
   setMinimizeToTray: (enabled: boolean) => void;
 }
 
+export interface SavedSettings {
+  ancMode?: number;
+  gameMode?: boolean;
+  hiRes?: boolean;
+  volBoost?: boolean;
+  inEarFeatureEnabled?: boolean;
+  eqBands?: number[];
+  eqPreset?: string;
+  gestures?: {
+    left: Record<number, number>;
+    right: Record<number, number>;
+  };
+}
+
+export const loadSavedSettings = (): SavedSettings | null => {
+  try {
+    const raw = localStorage.getItem('moto_buds_preferences');
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return null;
+};
+
+export const saveSettings = (partial: Partial<SavedSettings>) => {
+  try {
+    const current = loadSavedSettings() || {};
+    const updated = { ...current, ...partial };
+    localStorage.setItem('moto_buds_preferences', JSON.stringify(updated));
+  } catch (e) {}
+};
+
+export const applySavedSettingsToDevice = async () => {
+  const saved = loadSavedSettings();
+  if (!saved || !(window as any).api || !(window as any).api.motoCommand) return;
+
+  try {
+    // 1. ANC Mode
+    if (saved.ancMode !== undefined) {
+      await (window as any).api.motoCommand({ op: 'anc', mode: saved.ancMode });
+    }
+
+    // 2. Game Mode
+    if (saved.gameMode !== undefined) {
+      await (window as any).api.motoCommand({ op: 'game', enabled: saved.gameMode ? 1 : 0 });
+    }
+
+    // 3. Hi-Res Mode
+    if (saved.hiRes !== undefined) {
+      await (window as any).api.motoCommand({ op: 'hires', enabled: saved.hiRes ? 1 : 0 });
+    }
+
+    // 4. Volume Boost
+    if (saved.volBoost !== undefined) {
+      await (window as any).api.motoCommand({ op: 'volboost', enabled: saved.volBoost ? 1 : 0 });
+    }
+
+    // 5. In-Ear Detection
+    if (saved.inEarFeatureEnabled !== undefined) {
+      await (window as any).api.motoCommand({ op: 'inear', enabled: saved.inEarFeatureEnabled ? 1 : 0 });
+    }
+
+    // 6. Custom EQ
+    if (saved.eqBands && saved.eqBands.length === 10) {
+      await (window as any).api.motoCommand({ op: 'eq', bands: saved.eqBands });
+    }
+
+    // 7. Gestures
+    if (saved.gestures) {
+      if (saved.gestures.left) {
+        for (const [gt, fn] of Object.entries(saved.gestures.left)) {
+          await (window as any).api.motoCommand({ op: 'gesture', earbud: 0, gesture: parseInt(gt), func: fn });
+        }
+      }
+      if (saved.gestures.right) {
+        for (const [gt, fn] of Object.entries(saved.gestures.right)) {
+          await (window as any).api.motoCommand({ op: 'gesture', earbud: 1, gesture: parseInt(gt), func: fn });
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Failed to auto-apply saved settings to device:", e);
+  }
+};
+
+const initialSaved = loadSavedSettings();
+
 export const useDeviceStore = create<DeviceState>((set, get) => ({
   connected: false,
   modelId: null,
   name: null,
   features: [],
   battery: { left: null, right: null, case: null, chargingL: false, chargingR: false, chargingCase: false, inCaseL: false, inCaseR: false },
-  ancMode: 0,
+  ancMode: initialSaved?.ancMode !== undefined ? initialSaved.ancMode : 0,
   ancSubMode: 0,
-  eqBands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  eqPreset: 'Custom EQ',
-  hiRes: false,
-  gameMode: false,
-  inEarFeatureEnabled: false,
+  eqBands: initialSaved?.eqBands || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  eqPreset: initialSaved?.eqPreset || 'Custom EQ',
+  hiRes: initialSaved?.hiRes ?? false,
+  gameMode: initialSaved?.gameMode ?? false,
+  inEarFeatureEnabled: initialSaved?.inEarFeatureEnabled ?? false,
   physicallyInEarL: true,
   physicallyInEarR: true,
-  volBoost: false,
+  volBoost: initialSaved?.volBoost ?? false,
   fitTestRunning: false,
   fitTestResultL: null,
   fitTestResultR: null,
   fmdLeft: false,
   fmdRight: false,
-  gestures: { left: {}, right: {} },
+  gestures: initialSaved?.gestures || { left: {}, right: {} },
   currentView: 'main',
   reconnectStatus: 'idle',
   minimizeToTray: localStorage.getItem('minimizeToTray') === 'true',
@@ -229,6 +314,8 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   }),
 
   setAncMode: (mode, subMode) => {
+    set({ ancMode: mode });
+    saveSettings({ ancMode: mode });
     if ((window as any).sendOpcodeToDevice) {
       (window as any).sendOpcodeToDevice(513, [mode, subMode]);
     }
@@ -236,20 +323,28 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
 
   setEqBands: (bands) => {
     set({ eqBands: bands });
+    saveSettings({ eqBands: bands });
     if ((window as any).api && (window as any).api.motoCommand) {
       (window as any).api.motoCommand({ op: 'eq', bands });
     }
   },
 
-  setEqPreset: (preset) => set({ eqPreset: preset }),
+  setEqPreset: (preset) => {
+    set({ eqPreset: preset });
+    saveSettings({ eqPreset: preset });
+  },
 
   setGameMode: (enabled) => {
+    set({ gameMode: enabled });
+    saveSettings({ gameMode: enabled });
     if ((window as any).sendOpcodeToDevice) {
       (window as any).sendOpcodeToDevice(783, [enabled ? 1 : 0]);
     }
   },
 
   setHiRes: (enabled) => {
+    set({ hiRes: enabled });
+    saveSettings({ hiRes: enabled });
     if ((window as any).sendOpcodeToDevice) {
       (window as any).sendOpcodeToDevice(781, [enabled ? 1 : 0]);
     }
@@ -257,12 +352,15 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
 
   setInEarFeature: (enabled) => {
     set({ inEarFeatureEnabled: enabled });
+    saveSettings({ inEarFeatureEnabled: enabled });
     if ((window as any).sendOpcodeToDevice) {
       (window as any).sendOpcodeToDevice(1027, [enabled ? 1 : 0]);
     }
   },
 
   setVolBoost: (enabled) => {
+    set({ volBoost: enabled });
+    saveSettings({ volBoost: enabled });
     if ((window as any).sendOpcodeToDevice) {
       (window as any).sendOpcodeToDevice(788, [enabled ? 1 : 0]);
     }
@@ -276,6 +374,18 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   },
 
   setGestureConfig: (earbud, gestureType, func) => {
+    const currentGestures = get().gestures;
+    const isLeft = earbud === 0;
+    const side = isLeft ? 'left' : 'right';
+    const updatedGestures = {
+      ...currentGestures,
+      [side]: {
+        ...currentGestures[side],
+        [gestureType]: func,
+      },
+    };
+    set({ gestures: updatedGestures });
+    saveSettings({ gestures: updatedGestures });
     if ((window as any).api && (window as any).api.motoCommand) {
       (window as any).api.motoCommand({ op: 'gesture', earbud, gesture: gestureType, func });
     }

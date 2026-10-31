@@ -1,9 +1,17 @@
+import os
+import sys
 import socket
+
+# Re-exec with system python if current Python lacks AF_BLUETOOTH (e.g. mise/pyenv/asdf)
+if sys.platform == "linux" and not hasattr(socket, "AF_BLUETOOTH"):
+    for system_python in ["/usr/bin/python3", "/bin/python3"]:
+        if os.path.exists(system_python) and sys.executable != system_python:
+            os.execv(system_python, [system_python] + sys.argv)
+
 import binascii
 import struct
 import time
 import argparse
-import sys
 import json
 import subprocess
 
@@ -50,18 +58,14 @@ def discover_moto_device():
         # 3. Probe candidate RFCOMM ports (28 for Moto Buds 2, 16 for Moto Buds / Buds+)
         if detected_mac:
             candidate_ports = [28, 16, 13, 17, 1, 2, 3]
-            probe_packet = bytearray(b"HEAD\x08\x00\x00\x00\x80\x00\x00\x00\x00\x00\x57\xa3\x1f\xa5TAIL")
             for port in candidate_ports:
                 s = None
                 try:
                     s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-                    s.settimeout(0.5)
+                    s.settimeout(0.8)
                     s.connect((detected_mac, port))
-                    s.send(probe_packet)
-                    resp = s.recv(1024)
-                    if b"HEAD" in resp:
-                        detected_port = port
-                        break
+                    detected_port = port
+                    break
                 except Exception:
                     pass
                 finally:
@@ -95,9 +99,9 @@ class MotoBudsController:
 
     def connect(self):
         # Resolve auto mac/port if needed
-        if self.mac_address in ("AUTO", None, ""):
+        if self.mac_address in ("AUTO", None, "") or self.port in (16, None):
             auto_mac, auto_port = discover_moto_device()
-            if auto_mac:
+            if auto_mac and self.mac_address in ("AUTO", None, ""):
                 self.mac_address = auto_mac
             if auto_port:
                 self.port = auto_port
@@ -208,9 +212,34 @@ class MotoBudsController:
         self._send_and_receive(0x0010, b"")
         time.sleep(0.2)
 
+    def _get_bluez_battery(self):
+        if sys.platform != "linux" or self.mac_address in ("127.0.0.1", "AUTO", None):
+            return None
+        try:
+            out = subprocess.check_output(["bluetoothctl", "info", self.mac_address], text=True, timeout=2)
+            import re
+            m = re.search(r"Battery Percentage:\s+0x[0-9a-fA-F]+\s+\((\d+)\)", out)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
+        return None
+
     def read_battery(self):
         self.log("[*] Reading Battery Level...")
-        resp = self._send_and_receive(0x0005, b"")
+        resp = None
+        if not self.is_daemon:
+            resp = self._send_and_receive(0x0005, b"")
+        else:
+            self.send_command(0x0005, b"")
+
+        # Fallback to BlueZ battery info on Linux if SPP doesn't return battery levels
+        if not resp:
+            bluez_bat = self._get_bluez_battery()
+            if bluez_bat is not None:
+                # Opcode 9 Battery notification: Left, Right, Case=0xFF (unknown/not in case)
+                resp = self._create_packet(0x0009, bytes([bluez_bat, bluez_bat, 0xFF]))
+
         if resp:
             self.log(f"[+] Raw Battery Response: {resp.hex()}")
         return resp.hex() if resp else None
@@ -353,6 +382,10 @@ def main():
             sys.exit(1)
             
         print(json.dumps({"type": "status", "status": "connected"}), flush=True)
+        # Emit initial battery state
+        init_bat = controller.read_battery()
+        if init_bat:
+            print(json.dumps({"type": "battery", "data": init_bat}), flush=True)
         
         import subprocess
         subprocess.Popen("killall -q mpris-proxy ; sleep 0.5 ; mpris-proxy &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -368,16 +401,31 @@ def main():
                     cmd = json.loads(line)
                     op = cmd.get("op")
                     if op == "anc":
-                        sub_mode = 1 if cmd.get("mode") == 1 else 0
-                        controller.toggle_anc(cmd.get("mode"), sub_mode)
+                        mode = cmd.get("mode")
+                        sub_mode = 1 if mode == 1 else 0
+                        controller.toggle_anc(mode, sub_mode)
+                        anc_pkt = controller._create_packet(0x0204, bytes([mode, sub_mode]))
+                        print(json.dumps({"type": "event", "data": anc_pkt.hex()}), flush=True)
                     elif op == "game":
-                        controller.toggle_game_mode(cmd.get("enabled"))
+                        en = 1 if cmd.get("enabled") else 0
+                        controller.toggle_game_mode(en)
+                        game_pkt = controller._create_packet(0x0312, bytes([en]))
+                        print(json.dumps({"type": "event", "data": game_pkt.hex()}), flush=True)
                     elif op == "inear":
-                        controller.toggle_inear(cmd.get("enabled"))
+                        en = 1 if cmd.get("enabled") else 0
+                        controller.toggle_inear(en)
+                        inear_pkt = controller._create_packet(1027, bytes([en]))
+                        print(json.dumps({"type": "event", "data": inear_pkt.hex()}), flush=True)
                     elif op == "volboost":
-                        controller.toggle_volboost(cmd.get("enabled"))
+                        en = 1 if cmd.get("enabled") else 0
+                        controller.toggle_volboost(en)
+                        vb_pkt = controller._create_packet(789, bytes([en]))
+                        print(json.dumps({"type": "event", "data": vb_pkt.hex()}), flush=True)
                     elif op == "hires":
-                        controller.toggle_hires(cmd.get("enabled"))
+                        en = 1 if cmd.get("enabled") else 0
+                        controller.toggle_hires(en)
+                        hires_pkt = controller._create_packet(785, bytes([en]))
+                        print(json.dumps({"type": "event", "data": hires_pkt.hex()}), flush=True)
                     elif op == "fit":
                         controller.toggle_fit(cmd.get("enabled"))
                     elif op == "fmd":
@@ -385,7 +433,12 @@ def main():
                     elif op == "eq":
                         controller.set_custom_eq(cmd.get("bands"))
                     elif op == "gesture":
-                        controller.set_gesture(cmd.get("earbud"), cmd.get("gesture"), cmd.get("func"))
+                        eb = cmd.get("earbud")
+                        gt = cmd.get("gesture")
+                        fn = cmd.get("func")
+                        controller.set_gesture(eb, gt, fn)
+                        g_pkt = controller._create_packet(0x0105, bytes([eb, gt, fn]))
+                        print(json.dumps({"type": "event", "data": g_pkt.hex()}), flush=True)
                     elif op == "sync":
                         res_anc = controller._send_and_receive(0x0200, b"")
                         res_hires = controller._send_and_receive(0x030C, b"")
@@ -407,6 +460,9 @@ def main():
                         print(json.dumps({"type": "info", "data": res}), flush=True)
                 except Exception as e:
                     controller.log(f"[-] Daemon JSON command error: {e}")
+            # Exit daemon immediately when stdin reaches EOF (parent Electron closed)
+            controller.disconnect()
+            os._exit(0)
         
         # Start the thread that listens to commands from Electron
         t = threading.Thread(target=stdin_listener, daemon=True)
@@ -414,8 +470,19 @@ def main():
         
         # Main thread acts as the async event polling loop
         controller.sock.settimeout(0.5)
+        last_battery_poll = time.time()
         while True:
             try:
+                # Periodic battery update every 15 seconds
+                now = time.time()
+                if now - last_battery_poll > 15:
+                    last_battery_poll = now
+                    b_hex = controller.read_battery()
+                    if b_hex:
+                        print(json.dumps({"type": "battery", "data": b_hex}), flush=True)
+
+                if not controller.sock:
+                    break
                 data = controller.sock.recv(1024)
                 if data:
                     print(json.dumps({"type": "event", "data": data.hex()}), flush=True)
@@ -513,7 +580,11 @@ def main():
             except Exception as e:
                 controller.log(f"[-] Keepalive error: {e}")
             finally:
-                controller.sock.settimeout(2.0)
+                if controller.sock:
+                    try:
+                        controller.sock.settimeout(2.0)
+                    except Exception:
+                        pass
             results["data"]["async_events"] = async_events
             
         controller.disconnect()

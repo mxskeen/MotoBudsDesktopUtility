@@ -1,7 +1,7 @@
 {
   "name": "motobudsdesktoputility",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.1.2",
   "author": "ThisWasAryan <aryanrajviiid12@gmail.com>",
   "main": "dist-electron/main.js",
   "type": "module",

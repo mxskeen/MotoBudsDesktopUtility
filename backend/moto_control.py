@@ -81,6 +81,39 @@ def discover_moto_device():
             except Exception:
                 pass
 
+    elif sys.platform == "win32":
+        import re
+        try:
+            ps_cmd = 'Get-PnpDevice -Class Bluetooth | Where-Object { $_.FriendlyName -match "moto buds" } | Select-Object -ExpandProperty DeviceID'
+            out = subprocess.check_output(["powershell", "-NoProfile", "-Command", ps_cmd], text=True, timeout=4)
+            for line in out.strip().splitlines():
+                m = re.search(r"DEV_([0-9A-Fa-f]{12})", line)
+                if m:
+                    raw_mac = m.group(1)
+                    detected_mac = ":".join(raw_mac[i:i+2] for i in range(0, 12, 2))
+                    break
+        except Exception:
+            pass
+
+        if detected_mac:
+            candidate_ports = [28, 16, 13, 17, 1, 2, 3]
+            for port in candidate_ports:
+                s = None
+                try:
+                    s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+                    s.settimeout(0.8)
+                    s.connect((detected_mac, port))
+                    detected_port = port
+                    break
+                except Exception:
+                    pass
+                finally:
+                    if s:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+
     return detected_mac, detected_port
 
 class MotoBudsController:
